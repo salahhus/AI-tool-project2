@@ -1,0 +1,288 @@
+@page "/"
+@rendermode InteractiveServer
+@inject IJiraService JiraService
+@inject IOpportunityClassifier Classifier
+
+<PageTitle>Arkik Opportunity Classifier</PageTitle>
+
+<div class="page">
+    <div class="header">
+        <div>
+            <h1>Arkik Opportunity Classifier</h1>
+            <p class="subtitle">Paste a Jira ticket URL and let AI pick the matching Arkik opportunity.</p>
+        </div>
+
+        @if (account is not null)
+        {
+            <div class="account @(account.IsConnected ? "connected" : "disconnected")">
+                @if (account.IsConnected)
+                {
+                    @if (!string.IsNullOrEmpty(account.AvatarUrl))
+                    {
+                        <img src="@account.AvatarUrl" alt="" class="avatar" />
+                    }
+                    <div>
+                        <div class="account-name">@account.DisplayName</div>
+                        <div class="account-mail">@account.EmailAddress</div>
+                    </div>
+                }
+                else
+                {
+                    <div>
+                        <div class="account-name">Not connected to Jira</div>
+                        <div class="account-mail">@account.Error</div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="card">
+        <label for="jiraUrl">Jira ticket URL</label>
+        <div class="row">
+            <input id="jiraUrl" @bind="jiraUrl" @bind:event="oninput"
+                   placeholder="https://cemexpmo.atlassian.net/browse/ARKIK-42798" />
+            <button class="primary" @onclick="ClassifyAsync" disabled="@(isBusy || string.IsNullOrWhiteSpace(jiraUrl))">
+                @(isBusy ? "Analyzing..." : "Analyze")
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(error))
+    {
+        <div class="card error">@error</div>
+    }
+
+    <div class="layout">
+        <div class="main-column">
+            @if (result is not null)
+            {
+                <div class="card">
+                    <div class="issue-key">@result.IssueKey &mdash; @result.Summary</div>
+
+                    <div class="opportunity">@result.Opportunity</div>
+
+                    <div class="meta">
+                        <span class="badge @(result.Source == "ai" ? "badge-ai" : "badge-fallback")">
+                            @(result.Source == "ai" ? "AI" : "keyword fallback")
+                        </span>
+                        <span class="confidence">Confidence: @result.Confidence.ToString("P0")</span>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(result.Reason))
+                    {
+                        <p class="reason">@result.Reason</p>
+                    }
+                </div>
+
+                <div class="card">
+                    <h2>Ticket description</h2>
+                    <p class="hint">The phrase that justified the classification is highlighted.</p>
+                    <div class="description">
+                        @foreach (var line in DescriptionLines(result.HighlightedText))
+                        {
+                            @if (line.IsBlank)
+                            {
+                                <div class="spacer"></div>
+                            }
+                            else if (line.HeadingLevel > 0)
+                            {
+                                <div class="desc-heading level-@line.HeadingLevel">
+                                    @foreach (var segment in HighlightSegments(line.Text))
+                                    {
+                                        @if (segment.IsHighlighted)
+                                        {
+                                            <mark>@segment.Text</mark>
+                                        }
+                                        else
+                                        {
+                                            @segment.Text
+                                        }
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="@(line.IsBullet ? $"desc-bullet indent-{line.Indent}" : "desc-line")">
+                                    @foreach (var segment in HighlightSegments(line.Text))
+                                    {
+                                        @if (segment.IsHighlighted)
+                                        {
+                                            <mark>@segment.Text</mark>
+                                        }
+                                        else
+                                        {
+                                            @segment.Text
+                                        }
+                                    }
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="card placeholder">
+                    Analyze a Jira ticket to see the matching Arkik opportunity and the text that justifies it.
+                </div>
+            }
+        </div>
+
+        <aside class="side-column">
+            <div class="card">
+                <h2>All Arkik opportunities</h2>
+                <p class="hint">
+                    @(issue is null
+                        ? "Analyze a ticket first, then select an opportunity to re-generate the explanation."
+                        : "Select a different opportunity to re-generate the explanation for this ticket.")
+                </p>
+                <ul class="opportunities">
+                    @foreach (var opportunity in ArkikOpportunities.All)
+                    {
+                        <li>
+                            <button type="button"
+                                    class="opportunity-option @(result?.Opportunity == opportunity ? "selected" : null)"
+                                    disabled="@(isBusy || issue is null)"
+                                    @onclick="() => SelectOpportunityAsync(opportunity)">
+                                @opportunity
+                            </button>
+                        </li>
+                    }
+                </ul>
+            </div>
+        </aside>
+    </div>
+</div>
+
+@code {
+    private string jiraUrl = string.Empty;
+    private bool isBusy;
+    private string? error;
+    private ClassifyResponse? result;
+    private JiraIssue? issue;
+    private JiraAccount? account;
+
+    protected override async Task OnInitializedAsync()
+    {
+        account = await JiraService.GetCurrentUserAsync(CancellationToken.None);
+    }
+
+    private async Task ClassifyAsync()
+    {
+        isBusy = true;
+        error = null;
+        result = null;
+        issue = null;
+
+        try
+        {
+            var fetched = await JiraService.GetIssueAsync(jiraUrl, CancellationToken.None);
+            var classification = await Classifier.ClassifyAsync(fetched, CancellationToken.None);
+            classification.IssueKey = fetched.Key;
+            classification.Summary = fetched.Summary;
+            classification.Description = fetched.Description;
+            issue = fetched;
+            result = classification;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task SelectOpportunityAsync(string opportunity)
+    {
+        if (issue is null || isBusy)
+        {
+            return;
+        }
+
+        isBusy = true;
+        error = null;
+
+        try
+        {
+            var explanation = await Classifier.ExplainAsync(issue, opportunity, CancellationToken.None);
+            explanation.IssueKey = issue.Key;
+            explanation.Summary = issue.Summary;
+            explanation.Description = issue.Description;
+            result = explanation;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private record Segment(string Text, bool IsHighlighted);
+
+    private record DescriptionLine(string Text, int HeadingLevel, bool IsBullet, bool IsBlank, int Indent = 0);
+
+    /// <summary>
+    /// Turns the flattened Jira text into renderable lines, recognising the
+    /// '#' heading and '-' bullet prefixes produced by JiraService.
+    /// </summary>
+    private static IEnumerable<DescriptionLine> DescriptionLines(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            yield break;
+        }
+
+        foreach (var raw in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            var line = raw.TrimEnd();
+
+            if (line.Length == 0)
+            {
+                yield return new DescriptionLine(string.Empty, 0, false, true);
+                continue;
+            }
+
+            var trimmed = line.TrimStart();
+
+            if (trimmed.StartsWith('#'))
+            {
+                var level = trimmed.Length - trimmed.TrimStart('#').Length;
+                yield return new DescriptionLine(trimmed.TrimStart('#').TrimStart(), Math.Clamp(level, 1, 4), false, false);
+                continue;
+            }
+
+            if (trimmed.StartsWith("- "))
+            {
+                var indent = Math.Clamp((line.Length - trimmed.Length) / 2, 0, 3);
+                yield return new DescriptionLine(trimmed[2..], 0, true, false, indent);
+                continue;
+            }
+
+            yield return new DescriptionLine(line, 0, false, false);
+        }
+    }
+
+    /// <summary>Splits text on the ==highlight== markers produced by the classifier.</summary>
+    private static IEnumerable<Segment> HighlightSegments(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            yield break;
+        }
+
+        var parts = text.Split("==");
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].Length > 0)
+            {
+                yield return new Segment(parts[i], i % 2 == 1);
+            }
+        }
+    }
+}

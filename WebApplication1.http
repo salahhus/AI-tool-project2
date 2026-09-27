@@ -1,0 +1,15 @@
+@WebApplication1_HostAddress = http://localhost:5186
+
+GET {{WebApplication1_HostAddress}}/api/JiraOpportunity/opportunities
+Accept: application/json
+
+###
+
+POST {{WebApplication1_HostAddress}}/api/JiraOpportunity/classify
+Content-Type: application/json
+
+{
+  "jiraUrl": "https://your-company.atlassian.net/browse/ABC-123"
+}
+
+###
